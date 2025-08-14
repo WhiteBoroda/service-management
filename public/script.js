@@ -7,43 +7,259 @@ let editingClientId = null;
 let editingServiceId = null;
 let editingExpenseId = null;
 let assigningServiceId = null;
+let currentCompanyId = null;
+let companies = [];
+let tariffPlans = [];
+let slaLevels = [];
+let currentUser = null;
+let authToken = null;
 
-// API функции
+window.addEventListener('load', async () => {
+    authToken = localStorage.getItem('authToken');
+
+    if (authToken) {
+        try {
+            const response = await fetch('/api/auth/me', {
+                headers: { 'Authorization': `Bearer ${authToken}` }
+            });
+
+            if (response.ok) {
+                const data = await response.json();
+                currentUser = data.user;
+                showMainApp();
+                await init();
+            } else {
+                showLoginScreen();
+            }
+        } catch (error) {
+            console.error('Ошибка проверки авторизации:', error);
+            showLoginScreen();
+        }
+    } else {
+        showLoginScreen();
+    }
+});
+function showLoginScreen() {
+    document.getElementById('loginScreen').classList.remove('hidden');
+    document.getElementById('mainApp').classList.add('hidden');
+    localStorage.removeItem('authToken');
+    authToken = null;
+    currentUser = null;
+}
+
+// Показать основное приложение
+function showMainApp() {
+    document.getElementById('loginScreen').classList.add('hidden');
+    document.getElementById('mainApp').classList.remove('hidden');
+
+    // Обновляем информацию о пользователе
+    document.getElementById('currentUserName').textContent = currentUser.full_name;
+    document.getElementById('currentUserRole').textContent = getRoleDisplayName(currentUser.role);
+
+    // Применяем права доступа
+    applyRolePermissions();
+}
+
+// Обработка формы входа
+document.getElementById('loginForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+
+    const username = document.getElementById('username').value;
+    const password = document.getElementById('password').value;
+
+    try {
+        const response = await fetch('/api/auth/login', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username, password })
+        });
+
+        const data = await response.json();
+
+        if (response.ok) {
+            authToken = data.token;
+            currentUser = data.user;
+            localStorage.setItem('authToken', authToken);
+
+            showMainApp();
+            await init();
+        } else {
+            document.getElementById('loginError').textContent = data.error || 'Ошибка входа';
+            document.getElementById('loginError').classList.remove('hidden');
+        }
+    } catch (error) {
+        console.error('Ошибка входа:', error);
+        document.getElementById('loginError').textContent = 'Ошибка соединения с сервером';
+        document.getElementById('loginError').classList.remove('hidden');
+    }
+});
+
+// Выход из системы
+async function logout() {
+    try {
+        await fetch('/api/auth/logout', {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${authToken}` }
+        });
+    } catch (error) {
+        console.error('Ошибка выхода:', error);
+    }
+
+    showLoginScreen();
+}
+
+// Получить отображаемое название роли
+function getRoleDisplayName(role) {
+    const roleNames = {
+        'admin': 'Администратор',
+        'user': 'Пользователь',
+        'viewer': 'Наблюдатель'
+    };
+    return roleNames[role] || role;
+}
+
+// Применить права доступа к интерфейсу
+function applyRolePermissions() {
+    const userRole = currentUser.role;
+    const roleHierarchy = { viewer: 1, user: 2, admin: 3 };
+    const userLevel = roleHierarchy[userRole] || 0;
+
+    // Скрываем элементы, к которым нет доступа
+    document.querySelectorAll('[data-role]').forEach(element => {
+        const requiredRole = element.getAttribute('data-role');
+        const requiredLevel = roleHierarchy[requiredRole] || 0;
+
+        if (userLevel < requiredLevel) {
+            element.classList.add('hidden');
+        } else {
+            element.classList.remove('hidden');
+        }
+    });
+
+    // Дополнительная логика скрытия вкладок
+    const tabButtons = document.querySelectorAll('.tab[data-role]');
+    tabButtons.forEach(tab => {
+        const requiredRole = tab.getAttribute('data-role');
+        const requiredLevel = roleHierarchy[requiredRole] || 0;
+
+        if (userLevel < requiredLevel) {
+            tab.style.display = 'none';
+        }
+    });
+}
+
+// Обновленная функция apiCall с авторизацией
 async function apiCall(method, endpoint, data = null) {
     try {
         const options = {
             method: method,
             headers: { 'Content-Type': 'application/json' }
         };
+
+        // Добавляем токен авторизации
+        if (authToken) {
+            options.headers['Authorization'] = `Bearer ${authToken}`;
+        }
+
         if (data) {
             options.body = JSON.stringify(data);
         }
 
         const response = await fetch(endpoint, options);
+
+        // Проверяем авторизацию
+        if (response.status === 401) {
+            showLoginScreen();
+            throw new Error('Требуется авторизация');
+        }
+
+        if (response.status === 403) {
+            showMessage('Недостаточно прав для выполнения действия', 'error');
+            throw new Error('Недостаточно прав');
+        }
+
         if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
         return await response.json();
     } catch (error) {
-        showMessage('Ошибка API: ' + error.message, 'error');
+        if (error.message !== 'Требуется авторизация' && error.message !== 'Недостаточно прав') {
+            showMessage('Ошибка API: ' + error.message, 'error');
+        }
         throw error;
     }
 }
+
+// Управление пользователями
+function showAddUserForm() {
+    document.getElementById('addUserForm').classList.remove('hidden');
+}
+
+function hideAddUserForm() {
+    document.getElementById('addUserForm').classList.add('hidden');
+    document.getElementById('newUsername').value = '';
+    document.getElementById('newFullName').value = '';
+    document.getElementById('newPassword').value = '';
+}
+
+async function addUser() {
+    const username = document.getElementById('newUsername').value.trim();
+    const fullName = document.getElementById('newFullName').value.trim();
+    const password = document.getElementById('newPassword').value;
+    const role = document.getElementById('newUserRole').value;
+
+    if (!username || !fullName || !password) {
+        showMessage('Заполните все поля', 'error');
+        return;
+    }
+
+    try {
+        await apiCall('POST', '/api/users', {
+            username,
+            full_name: fullName,
+            password,
+            role
+        });
+
+        showMessage('Пользователь создан');
+        hideAddUserForm();
+        renderUsers();
+    } catch (error) {
+        console.error('Ошибка создания пользователя:', error);
+    }
+}
+// API функции
 
 // Инициализация
 async function init() {
     try {
         showMessage('Загрузка данных...', 'info');
-        clients = await apiCall('GET', '/api/clients');
-        services = await apiCall('GET', '/api/services');
-        employees = await apiCall('GET', '/api/employees');
-        expenses = await apiCall('GET', '/api/expenses');
-        updateStats();
-        renderAll();
+
+        // Загружаем новые данные для мульти-компанийности
+        companies = await apiCall('GET', '/api/companies');
+        tariffPlans = await apiCall('GET', '/api/tariff-plans');
+        slaLevels = await apiCall('GET', '/api/sla-levels');
+
+        renderCompanySelector();
+
+        if (companies.length > 0) {
+            currentCompanyId = companies[0].id;
+            await loadCompanyData();
+        } else {
+            // Fallback для старых данных без компаний
+            clients = await apiCall('GET', '/api/clients');
+            services = await apiCall('GET', '/api/services');
+            employees = await apiCall('GET', '/api/employees');
+            expenses = await apiCall('GET', '/api/expenses');
+            updateStats();
+            renderAll();
+        }
+
         showMessage('Данные загружены', 'success');
     } catch (error) {
         console.error('Ошибка инициализации:', error);
         showMessage('Ошибка загрузки данных', 'error');
     }
 }
+
 
 // Показать сообщение
 function showMessage(text, type = 'success') {
@@ -96,6 +312,55 @@ function renderAll() {
     renderServices();
     renderEmployees();
     renderExpenses();
+    renderUsers();
+}
+async function renderUsers() {
+    try {
+        const users = await apiCall('GET', '/api/users');
+        const container = document.getElementById('usersList');
+        container.innerHTML = '';
+
+        users.forEach(user => {
+            const userDiv = document.createElement('div');
+            userDiv.className = 'client-card';
+            userDiv.innerHTML = `
+                <div class="flex justify-between items-center mb-2">
+                    <div>
+                        <div class="font-medium">${user.full_name}</div>
+                        <div class="text-sm text-gray-500">@${user.username}</div>
+                    </div>
+                    <div class="flex gap-2 items-center">
+                        <span class="tag">${getRoleDisplayName(user.role)}</span>
+                        <span class="tag ${user.is_active ? 'tag-saas' : 'tag-inactive'}">
+                            ${user.is_active ? 'Активен' : 'Заблокирован'}
+                        </span>
+                        <button class="btn btn-secondary btn-small" onclick="toggleUserStatus(${user.id}, ${user.is_active})">
+                            ${user.is_active ? 'Заблокировать' : 'Активировать'}
+                        </button>
+                    </div>
+                </div>
+                <div class="text-sm text-gray-600">
+                    Создан: ${new Date(user.created_at).toLocaleDateString()}
+                    ${user.last_login ? `| Последний вход: ${new Date(user.last_login).toLocaleDateString()}` : ''}
+                </div>
+            `;
+            container.appendChild(userDiv);
+        });
+    } catch (error) {
+        console.error('Ошибка загрузки пользователей:', error);
+    }
+}
+
+async function toggleUserStatus(userId, isActive) {
+    try {
+        await apiCall('PUT', `/api/users/${userId}`, {
+            is_active: !isActive
+        });
+        showMessage(isActive ? 'Пользователь заблокирован' : 'Пользователь активирован');
+        renderUsers();
+    } catch (error) {
+        console.error('Ошибка изменения статуса пользователя:', error);
+    }
 }
 
 // Рендер клиентов
@@ -1284,54 +1549,71 @@ async function deleteClient(id) {
     }
 }
 
+
 async function addService() {
+    // Проверяем, выбрана ли компания (для новой мульти-компанийной версии)
+    if (currentCompanyId && !currentCompanyId) {
+        showMessage('Выберите компанию', 'error');
+        return;
+    }
+
+    // Получаем данные из формы
     const name = document.getElementById('serviceName').value.trim();
     const description = document.getElementById('serviceDescription').value.trim();
     const type = document.getElementById('serviceType').value;
     const weight = parseInt(document.getElementById('serviceWeight').value) || 1;
+    const quality = document.getElementById('serviceQuality').value;
 
+    // Новое поле для специализаций (если есть в форме)
+    const specializationsText = document.getElementById('serviceSpecializations')?.value.trim() || '';
+    const requiredSpecializations = specializationsText ?
+        specializationsText.split(',').map(s => s.trim()) : [];
+
+    // Валидация
     if (!name) {
         showMessage('Введите название сервиса', 'error');
         return;
     }
 
+    if (weight < 1 || weight > 5) {
+        showMessage('Вес сложности должен быть от 1 до 5', 'error');
+        return;
+    }
+
     try {
-        await apiCall('POST', '/api/services', { name, description, type, weight, quality: 'Medium', base_price: 0 });
+        // Подготавливаем данные для отправки
+        const serviceData = {
+            name,
+            description,
+            type,
+            weight,
+            quality: quality || 'Medium',
+            base_price: 0,
+            required_specializations: requiredSpecializations
+        };
+
+        // Добавляем company_id только если работаем с мульти-компанийной версией
+        if (typeof currentCompanyId !== 'undefined' && currentCompanyId) {
+            serviceData.company_id = currentCompanyId;
+        }
+
+        // Отправляем запрос на сервер
+        await apiCall('POST', '/api/services', serviceData);
+
         showMessage('Сервис добавлен');
         hideAddServiceForm();
-        await init();
+
+        // Перезагружаем данные
+        if (typeof loadCompanyData === 'function' && currentCompanyId) {
+            // Новая версия - загружаем данные компании
+            await loadCompanyData();
+        } else {
+            // Старая версия - загружаем все данные
+            await init();
+        }
     } catch (error) {
         console.error('Ошибка добавления сервиса:', error);
-    }
-}
-
-async function addEmployee() {
-    const name = document.getElementById('employeeName').value.trim();
-    const salary = parseFloat(document.getElementById('employeeSalary').value) || 0;
-
-    if (!name) {
-        showMessage('Введите имя сотрудника', 'error');
-        return;
-    }
-
-    if (salary <= 0) {
-        showMessage('Зарплата должна быть больше 0₴', 'error');
-        return;
-    }
-
-    if (salary < 15000) {
-        showMessage('Зарплата кажется слишком низкой (минимум ~15000₴)', 'error');
-        return;
-    }
-
-    try {
-        await apiCall('POST', '/api/employees', { name, salary, supported_services: [] });
-        showMessage('Сотрудник добавлен');
-        document.getElementById('employeeName').value = '';
-        document.getElementById('employeeSalary').value = '';
-        await init();
-    } catch (error) {
-        console.error('Ошибка добавления сотрудника:', error);
+        showMessage('Ошибка добавления сервиса', 'error');
     }
 }
 
@@ -1359,165 +1641,121 @@ async function addExpense() {
 
 // Расчет цен сервисов
 async function calculatePrices() {
+    if (!currentCompanyId) {
+        showMessage('Выберите компанию', 'error');
+        return;
+    }
+
     try {
-        // Получаем свежие данные
-        const employees = await apiCall('GET', '/api/employees');
-        const expenses = await apiCall('GET', '/api/expenses');
-        const services = await apiCall('GET', '/api/services');
-        const clients = await apiCall('GET', '/api/clients');
-        const settings = await apiCall('GET', '/api/financial-settings');
-
-        // Курс валют (можно сделать настраиваемым)
-        const USD_TO_UAH = 41; // Примерный курс доллара к гривне
-
-        // Считаем общие затраты компании в гривнах
-        const totalEmployeeCosts = employees.reduce((sum, emp) => sum + (emp.salary || 0), 0); // уже в гривнах
-        const totalExpensesUSD = expenses.reduce((sum, exp) => sum + (exp.monthly_amount || 0), 0); // в долларах
-        const totalExpensesUAH = totalExpensesUSD * USD_TO_UAH; // переводим в гривны
-        const totalMonthlyCosts = totalEmployeeCosts + totalExpensesUAH; // все в гривнах
-
-        if (totalMonthlyCosts <= 0) {
-            showMessage('Добавьте сотрудников и затраты для расчета цен', 'error');
-            return;
-        }
-
-        // Функция для подсчета веса оборудования клиента
-        function calculateEquipmentWeight(metadata) {
-            let totalWeight = 0;
-
-            Object.values(metadata || {}).forEach(categoryData => {
-                if (typeof categoryData === 'object' && categoryData !== null) {
-                    if (categoryData.count !== undefined && categoryData.weight !== undefined) {
-                        // Простая категория с весом
-                        totalWeight += categoryData.count * categoryData.weight;
-                    } else {
-                        // Сложная категория с элементами
-                        Object.values(categoryData).forEach(itemData => {
-                            if (typeof itemData === 'object' && itemData.count !== undefined) {
-                                totalWeight += itemData.count * itemData.weight;
-                            } else {
-                                // Старый формат - просто число, вес = 1
-                                totalWeight += (parseInt(itemData) || 0) * 1;
-                            }
-                        });
-                    }
-                } else {
-                    // Очень старый формат - просто число, вес = 1
-                    totalWeight += (parseInt(categoryData) || 0) * 1;
-                }
-            });
-
-            return totalWeight;
-        }
-
-        // Функция для подсчета веса сервисов клиента
-        function calculateServicesWeight(clientServices) {
-            let totalWeight = 0;
-
-            Object.entries(clientServices || {}).forEach(([serviceName, serviceData]) => {
-                if (serviceData.Use === 1) {
-                    const service = services.find(s => s.name === serviceName);
-                    if (service) {
-                        totalWeight += service.weight || 1;
-                    }
-                }
-            });
-
-            return totalWeight;
-        }
-
-        // Считаем общий вес нагрузки всех клиентов
-        let totalSystemWeight = 0;
-        const clientWeights = {};
-
-        clients.forEach(client => {
-            const equipmentWeight = calculateEquipmentWeight(client.metadata);
-            const servicesWeight = calculateServicesWeight(client.services);
-            const clientTotalWeight = equipmentWeight + servicesWeight;
-
-            clientWeights[client.id] = {
-                equipment: equipmentWeight,
-                services: servicesWeight,
-                total: clientTotalWeight
-            };
-
-            totalSystemWeight += clientTotalWeight;
+        const result = await apiCall('POST', '/api/calculate-prices', {
+            company_id: currentCompanyId
         });
 
-        if (totalSystemWeight <= 0) {
-            showMessage('У клиентов нет оборудования или сервисов для расчета', 'error');
-            return;
-        }
-
-        // Рассчитываем цены для каждого клиента
-        const profitMargin = (settings?.profit_margin || 20) / 100;
-        const clientPrices = {};
-
-        clients.forEach(client => {
-            const clientWeight = clientWeights[client.id];
-            if (clientWeight.total > 0) {
-                // Доля затрат клиента пропорциональна его весу
-                const costShare = totalMonthlyCosts * (clientWeight.total / totalSystemWeight);
-                const priceWithMargin = costShare * (1 + profitMargin);
-
-                clientPrices[client.id] = {
-                    name: client.name,
-                    equipmentWeight: clientWeight.equipment,
-                    servicesWeight: clientWeight.services,
-                    totalWeight: clientWeight.total,
-                    costShare: costShare,
-                    finalPrice: priceWithMargin,
-                    weightPercentage: (clientWeight.total / totalSystemWeight * 100)
-                };
-            }
-        });
-
-        // Показываем результаты расчета
-        showPricingResults(clientPrices, totalMonthlyCosts, totalSystemWeight, profitMargin, USD_TO_UAH);
-
-        showMessage('Расчет цен выполнен успешно!');
+        showPricingResults(result);
+        showMessage('Расчет цен выполнен успешно');
     } catch (error) {
         console.error('Ошибка расчета цен:', error);
-        showMessage('Ошибка расчета цен', 'error');
+        showMessage('Ошибка расчета цен: ' + error.message, 'error');
     }
 }
+function showPricingResults(clientPrices, totalCosts, totalWeight, margin, result) {
+    // Если передан новый формат результата (из мульти-компанийной версии)
+    if (result && result.clientPrices) {
+        const resultsHtml = `
+            <div style="background: white; padding: 20px; border-radius: 8px; margin: 20px 0; border: 2px solid #22c55e;">
+                <h3 style="color: #22c55e; margin-bottom: 15px;">Результаты расчета цен</h3>
+                
+                <div style="background: #f0fdf4; padding: 15px; border-radius: 6px; margin-bottom: 20px;">
+                    <h4>Общая информация:</h4>
+                    <p><strong>Общие затраты:</strong> ₴${result.totalMonthlyCosts.toFixed(2)}/мес</p>
+                    <p><strong>Общий вес системы:</strong> ${result.totalSystemWeight.toFixed(1)} единиц</p>
+                    <p><strong>Стоимость единицы:</strong> ₴${result.costPerUnit.toFixed(2)}/мес</p>
+                    <p><strong>Маржа:</strong> ${result.profitMargin.toFixed(1)}%</p>
+                </div>
+                
+                <div style="background: #eff6ff; padding: 15px; border-radius: 6px;">
+                    <h4>Цены для клиентов:</h4>
+                    ${Object.values(result.clientPrices).map(client => `
+                        <div style="background: white; padding: 12px; margin: 8px 0; border-radius: 6px; border-left: 4px solid #3b82f6;">
+                            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                                <strong>${client.name}</strong>
+                                <span style="font-size: 18px; font-weight: bold; color: #22c55e;">₴${client.finalPrice.toFixed(2)}/мес</span>
+                            </div>
+                            <div style="font-size: 13px; color: #6b7280;">
+                                Сервисы: ${client.servicesWeight.toFixed(1)} | 
+                                Оборудование: ${client.equipmentWeight.toFixed(1)} | 
+                                Тариф: ${client.tariffMultiplier}x | 
+                                SLA: ${client.slaMultiplier}x
+                            </div>
+                            <div style="font-size: 13px; color: #059669;">
+                                Базовый вес: ${client.baseWeight.toFixed(1)} → 
+                                Скорректированный: ${client.adjustedWeight.toFixed(1)} 
+                                (${client.weightPercentage.toFixed(1)}% от общего)
+                            </div>
+                        </div>
+                    `).join('')}
+                </div>
+                
+                <div style="background: #ecfdf5; padding: 15px; border-radius: 6px; margin-top: 15px;">
+                    <h4>Итоговые показатели:</h4>
+                    <p><strong>Общая выручка:</strong> ₴${result.summary.totalRevenue.toFixed(2)}/мес</p>
+                    <p><strong>Чистая прибыль:</strong> ₴${result.summary.totalProfit.toFixed(2)}/мес</p>
+                    <p><strong>Рентабельность:</strong> ${((result.summary.totalProfit / result.totalMonthlyCosts) * 100).toFixed(1)}%</p>
+                </div>
+            </div>
+        `;
 
-// Показать результаты расчета цен
-function showPricingResults(clientPrices, totalCosts, totalWeight, margin) {
+        const financeCard = document.getElementById('tab-finance');
+        const existingResults = financeCard.querySelector('.pricing-results');
+        if (existingResults) {
+            existingResults.remove();
+        }
+
+        const resultsDiv = document.createElement('div');
+        resultsDiv.className = 'pricing-results';
+        resultsDiv.innerHTML = resultsHtml;
+
+        const expensesSection = financeCard.querySelector('h3');
+        expensesSection.parentNode.insertBefore(resultsDiv, expensesSection);
+
+        return; // Выходим, если обработали новый формат
+    }
+
+    // Старый формат результата (для обратной совместимости)
     const resultsHtml = `
         <div style="background: white; padding: 20px; border-radius: 8px; margin: 20px 0; border: 2px solid #22c55e;">
-            <h3 style="color: #22c55e; margin-bottom: 15px;">💰 Результаты расчета справедливых цен</h3>
+            <h3 style="color: #22c55e; margin-bottom: 15px;">Результаты расчета справедливых цен</h3>
 
             <div style="background: #f0fdf4; padding: 15px; border-radius: 6px; margin-bottom: 20px;">
-                <h4>📊 Общая информация:</h4>
-                <p><strong>Общие затраты компании:</strong> ${totalCosts.toFixed(2)}/мес</p>
+                <h4>Общая информация:</h4>
+                <p><strong>Общие затраты компании:</strong> ₴${totalCosts.toFixed(2)}/мес</p>
                 <p><strong>Общий вес системы:</strong> ${totalWeight.toFixed(1)} единиц сложности</p>
                 <p><strong>Маржа прибыли:</strong> ${(margin * 100).toFixed(1)}%</p>
-                <p><strong>Стоимость 1 единицы сложности:</strong> ${(totalCosts / totalWeight).toFixed(2)}/мес</p>
+                <p><strong>Стоимость 1 единицы сложности:</strong> ₴${(totalCosts / totalWeight).toFixed(2)}/мес</p>
             </div>
 
             <div style="background: #eff6ff; padding: 15px; border-radius: 6px;">
-                <h4>🏢 Цены для клиентов:</h4>
+                <h4>Цены для клиентов:</h4>
                 ${Object.values(clientPrices).map(client => `
                     <div style="background: white; padding: 12px; margin: 8px 0; border-radius: 6px; border-left: 4px solid #3b82f6;">
                         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
                             <strong>${client.name}</strong>
-                            <span style="font-size: 18px; font-weight: bold; color: #22c55e;">${client.finalPrice.toFixed(2)}/мес</span>
+                            <span style="font-size: 18px; font-weight: bold; color: #22c55e;">₴${client.finalPrice.toFixed(2)}/мес</span>
                         </div>
                         <div style="font-size: 13px; color: #6b7280;">
-                            <span>🔧 Сервисы: ${client.servicesWeight.toFixed(1)} | </span>
-                            <span>📊 Оборудование: ${client.equipmentWeight.toFixed(1)} | </span>
-                            <span>⚖️ Итого: ${client.totalWeight.toFixed(1)} (${client.weightPercentage.toFixed(1)}% от общего веса)</span>
+                            <span>Сервисы: ${client.servicesWeight.toFixed(1)} | </span>
+                            <span>Оборудование: ${client.equipmentWeight.toFixed(1)} | </span>
+                            <span>Итого: ${client.totalWeight.toFixed(1)} (${client.weightPercentage.toFixed(1)}% от общего веса)</span>
                         </div>
                         <div style="font-size: 13px; color: #059669; margin-top: 4px;">
-                            Доля затрат: ${client.costShare.toFixed(2)} + маржа ${(margin * 100).toFixed(1)}% = ${client.finalPrice.toFixed(2)}
+                            Доля затрат: ₴${client.costShare.toFixed(2)} + маржа ${(margin * 100).toFixed(1)}% = ₴${client.finalPrice.toFixed(2)}
                         </div>
                     </div>
                 `).join('')}
             </div>
 
             <div style="margin-top: 15px; padding: 10px; background: #fef3c7; border-radius: 6px; font-size: 14px;">
-                <strong>💡 Принцип расчета:</strong> Цена для каждого клиента пропорциональна сложности его инфраструктуры.
+                <strong>Принцип расчета:</strong> Цена для каждого клиента пропорциональна сложности его инфраструктуры.
                 Учитывается вес обслуживания сервисов и оборудования. Чем сложнее инфраструктура - тем выше цена.
             </div>
         </div>
@@ -1537,7 +1775,6 @@ function showPricingResults(clientPrices, totalCosts, totalWeight, margin) {
     const expensesSection = financeCard.querySelector('h3');
     expensesSection.parentNode.insertBefore(resultsDiv, expensesSection);
 }
-
 // Импорт/экспорт
 async function handleFileUpload(event) {
     const file = event.target.files[0];
@@ -1666,6 +1903,217 @@ async function importDemoData() {
         await init();
     } catch (error) {
         console.error('Ошибка импорта демо данных:', error);
+    }
+}
+function renderCompanySelector() {
+    const select = document.getElementById('companySelect');
+    if (!select) return; // Если селектора нет в старой версии HTML
+
+    select.innerHTML = companies.map(company =>
+        `<option value="${company.id}">${company.name}</option>`
+    ).join('');
+
+    if (companies.length > 0) {
+        select.value = companies[0].id;
+        currentCompanyId = companies[0].id;
+        updateCompanyInfo();
+    }
+}
+
+async function switchCompany() {
+    const selectElement = document.getElementById('companySelect');
+    if (!selectElement) return;
+
+    currentCompanyId = parseInt(selectElement.value);
+
+    if (currentCompanyId) {
+        await loadCompanyData();
+        updateCompanyInfo();
+    }
+}
+
+async function loadCompanyData() {
+    if (!currentCompanyId) return;
+
+    try {
+        clients = await apiCall('GET', `/api/clients?company_id=${currentCompanyId}`);
+        services = await apiCall('GET', `/api/services?company_id=${currentCompanyId}`);
+        employees = await apiCall('GET', `/api/employees?company_id=${currentCompanyId}`);
+        expenses = await apiCall('GET', `/api/expenses?company_id=${currentCompanyId}`);
+
+        updateStats();
+        renderAll();
+    } catch (error) {
+        console.error('Ошибка загрузки данных компании:', error);
+        showMessage('Ошибка загрузки данных компании', 'error');
+    }
+}
+
+function updateCompanyInfo() {
+    const infoElement = document.getElementById('currentCompanyInfo');
+    if (!infoElement || !currentCompanyId) return;
+
+    const company = companies.find(c => c.id === currentCompanyId);
+
+    if (company) {
+        infoElement.textContent = company.description;
+        infoElement.style.display = 'block';
+    }
+}
+
+async function showAssignClientForm() {
+    const form = document.getElementById('assignClientForm');
+    if (!form) return; // Если формы нет в старой версии HTML
+
+    // Загружаем всех клиентов (не только текущей компании)
+    const allClients = await apiCall('GET', '/api/clients');
+
+    const clientSelect = document.getElementById('assignClientSelect');
+    clientSelect.innerHTML = '<option value="">Выберите клиента</option>' +
+        allClients.map(client =>
+            `<option value="${client.id}">${client.name}</option>`
+        ).join('');
+
+    const tariffSelect = document.getElementById('assignTariffSelect');
+    tariffSelect.innerHTML = '<option value="">Выберите тариф</option>' +
+        tariffPlans.map(tariff =>
+            `<option value="${tariff.id}">${tariff.name} (${tariff.multiplier}x)</option>`
+        ).join('');
+
+    const slaSelect = document.getElementById('assignSlaSelect');
+    slaSelect.innerHTML = '<option value="">Выберите SLA</option>' +
+        slaLevels.map(sla =>
+            `<option value="${sla.id}">${sla.name} (${sla.response_time_hours}ч, ${sla.multiplier}x)</option>`
+        ).join('');
+
+    form.classList.remove('hidden');
+}
+
+function hideAssignClientForm() {
+    const form = document.getElementById('assignClientForm');
+    if (form) form.classList.add('hidden');
+}
+
+async function assignClientToCompany() {
+    const clientId = document.getElementById('assignClientSelect').value;
+    const tariffId = document.getElementById('assignTariffSelect').value;
+    const slaId = document.getElementById('assignSlaSelect').value;
+
+    if (!clientId || !tariffId || !slaId) {
+        showMessage('Заполните все поля', 'error');
+        return;
+    }
+
+    try {
+        await apiCall('POST', '/api/client-company-assignments', {
+            client_id: parseInt(clientId),
+            company_id: currentCompanyId,
+            tariff_plan_id: parseInt(tariffId),
+            sla_level_id: parseInt(slaId)
+        });
+
+        showMessage('Клиент назначен к компании');
+        hideAssignClientForm();
+        await loadCompanyData();
+    } catch (error) {
+        console.error('Ошибка назначения клиента:', error);
+        showMessage('Ошибка назначения клиента', 'error');
+    }
+}
+
+async function addEmployee() {
+    // Проверяем, выбрана ли компания (для новой мульти-компанийной версии)
+    if (typeof currentCompanyId !== 'undefined' && currentCompanyId && !currentCompanyId) {
+        showMessage('Выберите компанию', 'error');
+        return;
+    }
+
+    // Получаем основные данные из формы
+    const name = document.getElementById('employeeName').value.trim();
+    const salary = parseFloat(document.getElementById('employeeSalary').value) || 0;
+
+    // Новые поля для мульти-компанийной версии (если есть в форме)
+    const specializationsText = document.getElementById('employeeSpecializations')?.value.trim() || '';
+    const hourlyRateInput = document.getElementById('employeeHourlyRate');
+    const hourlyRate = hourlyRateInput ? parseFloat(hourlyRateInput.value) || null : null;
+    const servicesText = document.getElementById('employeeServices')?.value.trim() || '';
+
+    // Валидация основных полей
+    if (!name) {
+        showMessage('Введите имя сотрудника', 'error');
+        return;
+    }
+
+    if (salary <= 0) {
+        showMessage('Зарплата должна быть больше 0₴', 'error');
+        return;
+    }
+
+    // Валидация почасовой ставки (если введена)
+    if (hourlyRate !== null && hourlyRate <= 0) {
+        showMessage('Почасовая ставка должна быть больше 0₴', 'error');
+        return;
+    }
+
+    // Обработка специализаций и поддерживаемых сервисов
+    const specializations = specializationsText ?
+        specializationsText.split(',').map(s => s.trim()).filter(s => s.length > 0) : [];
+
+    const supportedServices = servicesText ?
+        servicesText.split(',').map(s => s.trim()).filter(s => s.length > 0) : [];
+
+    try {
+        // Подготавливаем данные для отправки
+        const employeeData = {
+            name,
+            salary,
+            supported_services: supportedServices
+        };
+
+        // Добавляем поля для мульти-компанийной версии если они доступны
+        if (typeof currentCompanyId !== 'undefined' && currentCompanyId) {
+            employeeData.company_id = currentCompanyId;
+        }
+
+        if (specializations.length > 0) {
+            employeeData.specializations = specializations;
+        }
+
+        if (hourlyRate !== null) {
+            employeeData.hourly_rate = hourlyRate;
+        }
+
+        // Отправляем запрос на сервер
+        await apiCall('POST', '/api/employees', employeeData);
+
+        showMessage('Сотрудник добавлен');
+
+        // Очищаем форму
+        document.getElementById('employeeName').value = '';
+        document.getElementById('employeeSalary').value = '';
+
+        // Очищаем новые поля если они есть
+        if (document.getElementById('employeeSpecializations')) {
+            document.getElementById('employeeSpecializations').value = '';
+        }
+        if (document.getElementById('employeeHourlyRate')) {
+            document.getElementById('employeeHourlyRate').value = '';
+        }
+        if (document.getElementById('employeeServices')) {
+            document.getElementById('employeeServices').value = '';
+        }
+
+        // Перезагружаем данные
+        if (typeof loadCompanyData === 'function' && currentCompanyId) {
+            // Новая версия - загружаем данные компании
+            await loadCompanyData();
+        } else {
+            // Старая версия - загружаем все данные
+            await init();
+        }
+    } catch (error) {
+        console.error('Ошибка добавления сотрудника:', error);
+        showMessage('Ошибка добавления сотрудника', 'error');
     }
 }
 
